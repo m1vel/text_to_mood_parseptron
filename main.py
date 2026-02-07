@@ -1,165 +1,201 @@
-import re
 import random
-from Parseptron import Parseptron as PS
+import numpy as np
+import sys
+import os
+from typing import Dict, List, Tuple, Any
 
-moods = [
-    'neutral',
-    'sadness',
-    'fear', 
-    'joy',
-    'anger',
-    'irritation'
-]
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-dictionary = [
-    'класс', 'рад', 'супер', 'отлично', 'хорошо', 'прекрасно', 'доволен', 'счастлив',
-    'злюсь', 'бесит', 'ненавижу', 'злость', 'ярост', 'гнев', 'возмущен',
-    'грустно', 'печально', 'тоска', 'уныло', 'плачу', 'скорбь',
-    'страшно', 'боюсь', 'ужас', 'пугает', 'испуг', 'тревога',
-    'раздражает', 'досадно', 'бесит', 'надоело', 'достало',
-    'ладно', 'нормально', 'ок', 'пойдет', 'обычно', 'стандартно'
-]
+try:
+    from emotional_words import em_words
+    emotional_words = em_words()
+except ImportError:
+    sys.exit(1)
 
-def text_to_vector(text: str, dictionary: list[str]) -> list[int]:
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", "", text)
-    words = text.split()
-    word_set = set(words)
-    return [1 if word in word_set else 0 for word in dictionary]
+try:
+    from traindata import re_train_data, get_test_data
+    train_data = re_train_data()
+except ImportError:
+    sys.exit(1)
 
-def extend_dictionary_from_texts(texts):
-    new_words = set()
-    for text, _ in texts:
-        text = text.lower()
-        text = re.sub(r"[^\w\s]", "", text)
-        words = text.split()
-        new_words.update(words)
+try:
+    from text_work import preprocess_text, text_to_vector, extend_dictionary_from_texts
+except ImportError:
+    sys.exit(1)
+
+try:
+    from Parseptron import EmotionPerceptron
+    emotional_words = em_words()
+except ImportError:
+    sys.exit(1)
+moods = list(emotional_words.keys())
+
+all_words = set()
+for mood_words in emotional_words.values():
+    all_words.update(mood_words.keys())
+
+dictionary = list(all_words)
+dictionary = extend_dictionary_from_texts(train_data, dictionary)
+
+perceptrons = {mood: EmotionPerceptron(len(dictionary), lr=0.015, momentum=0.92) 
+               for mood in moods}
+
+def train_with_validation(train_set: List[Tuple[str, str]], 
+                         val_set: List[Tuple[str, str]], 
+                         epochs: int = 300,
+                         early_stopping_patience: int = 30) -> Dict[str, Any]:
+    best_accuracy = 0
+    patience_counter = 0
+    best_weights = {mood: (p.weights.copy(), p.bias) for mood, p in perceptrons.items()}
     
-    existing_words = set(dictionary)
-    return dictionary + [word for word in new_words if word not in existing_words]
-parseptrons = {
-    mood: PS(len(dictionary))
-    for mood in moods
-}
+    for epoch in range(epochs):
+        shuffled_data = train_set.copy()
+        random.shuffle(shuffled_data)
+        total_error = 0
+        correct_train = 0
+        for text, answer in shuffled_data:
+            x = text_to_vector(text, dictionary, emotional_words)
+            scores = {}
+            for mood, perceptron in perceptrons.items():
+                scores[mood] = perceptron.activate(x)
+            predicted = max(scores, key=scores.get)
+            if predicted == answer:
+                correct_train += 1
+            for mood, perceptron in perceptrons.items():
+                y = 1 if mood == answer else 0
+                error = perceptron.train(x, y)
+                total_error += error
+        correct_val = 0
+        val_predictions = []
+        for text, answer in val_set:
+            predicted, scores = select_mood(text)
+            val_predictions.append((text, answer, predicted, scores))
+            if predicted == answer:
+                correct_val += 1
+        train_accuracy = correct_train / len(train_set)
+        val_accuracy = correct_val / len(val_set)
+        if val_accuracy > best_accuracy:
+            best_accuracy = val_accuracy
+            best_weights = {mood: (p.weights.copy(), p.bias) for mood, p in perceptrons.items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            print(f"эпоха {epoch:3d}/{epochs}"
+                  f"ошибки: {total_error:.4f}"
+                  f"точность: {train_accuracy:.2%}")
+        if patience_counter >= early_stopping_patience:
+            break
+    for mood, (weights, bias) in best_weights.items():
+        perceptrons[mood].weights = weights
+        perceptrons[mood].bias = bias
+    return {
+        'best_accuracy': best_accuracy,
+        'final_val_accuracy': val_accuracy,
+        'epochs_trained': min(epoch, epochs)
+    }
 
-train_data = [
-    ("мне очень классно", "joy"),
-    ("я рад и доволен", "joy"),
-    ("супер, отлично", "joy"),
-    ("хорошее настроение", "joy"),
-    ("я счастлив сегодня", "joy"),
-    ("все прекрасно", "joy"),
-
-    ("я злюсь", "anger"),
-    ("меня это бесит", "anger"),
-    ("ненавижу это", "anger"),
-    ("это вызывает злость", "anger"),
-    ("я в ярости", "anger"),
-
-    ("мне грустно", "sadness"),
-    ("очень печально", "sadness"),
-    ("на душе тоска", "sadness"),
-    ("чувствую уныние", "sadness"),
-
-    ("мне страшно", "fear"),
-    ("я боюсь", "fear"),
-    ("это ужасно", "fear"),
-    ("меня пугает", "fear"),
-
-    ("это раздражает", "irritation"),
-    ("меня это бесит и раздражает", "irritation"),
-    ("достало уже", "irritation"),
-    ("надоело это", "irritation"),
-
-    ("ну ладно", "neutral"),
-    ("нормально, ок", "neutral"),
-    ("все в порядке", "neutral"),
-    ("ничего особенного", "neutral"),
-]
-
-dictionary = extend_dictionary_from_texts(train_data)
-
-parseptrons = {
-    mood: PS(len(dictionary))
-    for mood in moods
-}
-
-epochs = 100
-for epoch in range(epochs):
-    shuffled_data = train_data.copy()
-    random.shuffle(shuffled_data)
-    
-    total_error = 0
-    for text, answer in shuffled_data:
-        x = text_to_vector(text, dictionary)
-        
-        for mood, parseptron in parseptrons.items():
-            y = 1 if mood == answer else 0
-            error = parseptron.train(x, y)
-            total_error += error
-    
-    if epoch % 20 == 0:
-        print(f"  эпоха {epoch}/{epochs}, ошибка: {total_error}")
-
-def select_mood(text):
-    x = text_to_vector(text, dictionary)
-    activates = {}
-    
-    for mood, parseptron in parseptrons.items():
-        activates[mood] = parseptron.activate(x)
-    
-    best_mood = max(activates, key=activates.get)
-    return best_mood, activates
-def show_weights_for_text(text, mood):
-    x = text_to_vector(text, dictionary)
-    
-    print("\nвеса:")
-    
-    found_words_with_weights = []
-    for i, (word, present) in enumerate(zip(dictionary, x)):
-        if present == 1:
-            weight = parseptrons[mood].weights[i]
-            found_words_with_weights.append((word, weight))
-    
-    if found_words_with_weights:
-        sorted_words = sorted(found_words_with_weights, key=lambda x: abs(x[1]), reverse=True)
-        
-        for word, weight in sorted_words:
-            influence = "+" if weight > 0 else "-" if weight < 0 else "пох"
+def select_mood(text: str) -> Tuple[str, Dict[str, float]]:
+    x = text_to_vector(text, dictionary, emotional_words)
+    scores = {}
+    for mood, perceptron in perceptrons.items():
+        scores[mood] = perceptron.activate(x)
+    exp_scores = {k: np.exp(v) for k, v in scores.items()}
+    sum_exp = sum(exp_scores.values())
+    if sum_exp == 0:
+        probabilities = {k: 1/len(scores) for k in scores}
     else:
-        print("не найдено ключевых слов из словаря")
+        probabilities = {k: v/sum_exp for k, v in exp_scores.items()}
+    best_mood = max(probabilities, key=probabilities.get)
+    return best_mood, probabilities
 
-while True:
-    user_input = input("\nфраза: ").strip()
-    if user_input.lower() in ['выход', 'exit', 'quit']:
-        print("\n")
-        break
-    if not user_input:
-        continue
-    mood, all_scores = select_mood(user_input)
-    print(f"\nнастроение: {mood.upper()}")
-    print("все настроения:")
-    sorted_scores = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
-    for k, v in sorted_scores:
-        indicator = "+" if k == mood else "-"
-        print(f"  {indicator} {k:12}: {v:7.2f}")
-    show_weights_for_text(user_input, mood)
-    
-    text_lower = user_input.lower()
-    text_lower = re.sub(r"[^\w\s]", "", text_lower)
-    words_in_text = set(text_lower.split())
-    words_in_dict = [word for word in words_in_text if word in dictionary]
-    
-    if words_in_dict:
-        print(f"\nфразы в словаре: {', '.join(words_in_dict)}")
+def analyze_text(text: str, verbose: bool = True) -> Tuple[str, Dict[str, float]]:
+    text_clean = preprocess_text(text)
+    mood, probabilities = select_mood(text)
+    if verbose:
+        sorted_probs = sorted(probabilities.items(), key=lambda x: x[1], reverse=True)
+        for k, v in sorted_probs:
+            indicator = ".!." if k == mood else ".-."
+            print(f"  [{indicator}] {k:12} : {v:7.2%}")
+        words = text_clean.split()
+        found_emotional_words = []
+        for word in words:
+            if word in dictionary:
+                related_emotions = []
+                for emotion, words_dict in emotional_words.items():
+                    if word in words_dict:
+                        related_emotions.append((emotion, words_dict[word]))
+                if related_emotions:
+                    emotion, weight = max(related_emotions, key=lambda x: x[1])
+                    found_emotional_words.append((word, emotion, weight))
+        if found_emotional_words:
+            found_emotional_words.sort(key=lambda x: x[2], reverse=True)
+            for word, emotion, weight in found_emotional_words:
+                strength = "слабенько" if weight < 1.3 else "средненько" if weight < 1.7 else "сильненько"
+                print(f"  '{word}' - {emotion:12} ({strength}, вес: {weight:.2f})")
+                print(f"конечное настроение: {mood.upper()} ({probabilities[mood]:.1%})")
+        else:
+            print("нет значимых слов")
+    return mood, probabilities
 
-print("\nстатистика модели:")
+def test_model(test_phrases: List[str]):   
+    results = []
+    for phrase in test_phrases:
+        if isinstance(phrase, tuple):
+            phrase = phrase[0]
+        elif not isinstance(phrase, str):
+            phrase = str(phrase)
+        mood, probs = analyze_text(phrase, verbose=False)
+        max_prob = max(probs.values())
+        results.append((phrase, mood, max_prob))
+    return results
 
-print("\nважные слова для каждого настроения:")
-for mood, perc in parseptrons.items():
-    word_weights = list(zip(dictionary, perc.weights))
-    positive_words = sorted([(w, weight) for w, weight in word_weights if weight > 0], 
-                           key=lambda x: x[1], reverse=True)[:3]
-    if positive_words:
-        top_words = ", ".join([w for w, _ in positive_words])
-        print(f"  {mood:12}: {top_words}")
+def show_model_statistics():
+    for mood, perceptron in perceptrons.items():
+        important = perceptron.get_important_features(dictionary, top_n=5)
+        if important:
+            words_str = ", ".join([f"{w} ({weight:+.3f})" for w, weight in important])
+            print(f"{mood:12}:{words_str}")
+
+test_phrases = get_test_data()
+
+def main():
+    random.shuffle(train_data)
+    split_idx = int(len(train_data) * 0.8)
+    train_set = train_data[:split_idx]
+    val_set = train_data[split_idx:]
+    results = train_with_validation(
+        train_set, 
+        val_set, 
+        epochs=400,
+        early_stopping_patience=100
+    )
+    print(results)
+    test_results = test_model(test_phrases)
+    print(test_results)
+    show_model_statistics()
+    while True:
+        try:
+            user_input = input("фраза: ").strip()
+            
+            if not user_input:
+                continue
+            if user_input.lower() in ['выход', 'exit', 'quit', 'q']:
+                break
+            
+            elif user_input.lower() in ['стат', 'статистика', 'stats']:
+                show_model_statistics()
+                continue
+            
+            elif user_input.lower() in ['тест', 'test']:
+                test_model(test_phrases)
+                continue
+            mood, probs = analyze_text(user_input, verbose=True)
+            
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            continue
+
+if __name__ == "__main__":
+    main()
