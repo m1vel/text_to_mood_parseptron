@@ -136,6 +136,7 @@ def analyze_text(text: str, verbose: bool = True) -> Tuple[str, Dict[str, float]
                 print(f"конечное настроение: {mood.upper()} ({probabilities[mood]:.1%})")
         else:
             print("нет значимых слов")
+        print(f"конечное настроение: {mood.upper()} ({probabilities[mood]:.1%})")
     return mood, probabilities
 
 def test_model(test_phrases: List[str]):   
